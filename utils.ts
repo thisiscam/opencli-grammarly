@@ -415,6 +415,10 @@ export async function extractAlerts(page: IPage): Promise<Alert[]> {
       const alerts = [];
       let idx = 0;
       for (const texts of cards) {
+        // Skip Pro upsell / promo cards
+        const joined = texts.join(' ');
+        if (joined.includes('with Pro') || joined.includes('Upgrade') || joined.includes('Get Pro')) continue;
+
         const { message, original, replacement } = parseCard(texts);
         if (!original) continue;
 
