@@ -10,10 +10,11 @@ cli({
   args: [
     { name: 'text', required: true, positional: true, help: 'Text to check (or file path)' },
     { name: 'severity', default: 'all', help: 'Filter: critical | warning | all' },
+    { name: 'doc', help: 'Grammarly document ID to reuse (default: shared scratch doc)' },
   ],
   columns: ['rank', 'category', 'severity', 'message', 'original', 'replacement'],
   func: async (page, args) => {
-    await submitText(page, args.text as string);
+    await submitText(page, args.text as string, args.doc as string | undefined);
     const alerts = await extractAlerts(page);
 
     // Filter by severity if requested
