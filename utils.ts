@@ -128,22 +128,28 @@ export async function submitText(page: IPage, text: string, docId?: string): Pro
     await page.wait(500);
   }
 
-  // Focus the editor body
+  // Focus the editor body and clear it completely
   await page.evaluate(`document.querySelector('${SEL_EDITOR}')?.focus()`);
   await page.wait(300);
 
-  // Select all + delete existing text, then type new text via CDP
-  // Using pressKey + insertText (CDP native) instead of execCommand,
-  // because Grammarly uses ProseMirror which ignores execCommand.
-  await page.pressKey('Meta+a');
-  await page.wait(200);
-  await page.pressKey('Backspace');
-  await page.wait(200);
+  // Clear with retry — ProseMirror sometimes doesn't fully clear on first attempt
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await page.pressKey('Meta+a');
+    await page.wait(200);
+    await page.pressKey('Backspace');
+    await page.wait(300);
 
+    // Verify editor is empty
+    const remaining = await page.evaluate(`
+      document.querySelector('${SEL_EDITOR}')?.innerText?.trim()?.length || 0
+    `) as number;
+    if (remaining === 0) break;
+  }
+
+  // Insert new text via CDP (native input, works with ProseMirror)
   if (page.insertText) {
     await page.insertText(text);
   } else {
-    // Fallback: type char-by-char (slow but works)
     for (const ch of text) {
       await page.pressKey(ch);
     }
@@ -213,12 +219,25 @@ export async function extractAlerts(page: IPage): Promise<Alert[]> {
       }
 
       // ── Parse a fullContent text list into {message, original, replacement} ──
+      //
+      // SDUI text sequence pattern:
+      //   [message] [message-dup] [context?] [ORIGINAL] "bold" "strikeoutHorizontal"
+      //   " " [REPLACEMENT] "bold" [context?] ... (pattern repeats for collapsed/expanded)
+      //   "Accept" "Dismiss" ...
+      //
+      // Key insight: the sequence [word] "bold" "strikeoutHorizontal" always marks
+      // the original, and [word] "bold" immediately after marks the replacement.
+      // Context snippets contain "…" and should be skipped.
+      //
       function parseCard(texts) {
         let message = '';
         let original = '';
         let replacement = '';
 
-        // First text that contains "·" or starts with a known category prefix is the message
+        const FORMAT_TOKENS = new Set(['bold', 'italic', 'strikeoutHorizontal', ' ']);
+        const UI_TOKENS = new Set(['Accept', 'Dismiss', 'Incorrect suggestion', 'Offensive content']);
+
+        // Extract message: first text matching category pattern
         for (const t of texts) {
           if (/^(Correctness|Clarity|Engagement|Delivery)\\s/.test(t) || /Correct |Use the |Rewrite|Consider|Add a/.test(t)) {
             message = t;
@@ -226,27 +245,26 @@ export async function extractAlerts(page: IPage): Promise<Alert[]> {
           }
         }
 
-        // Find the original: the text right before "strikeoutHorizontal"
-        for (let i = 0; i < texts.length; i++) {
-          if (texts[i] === 'strikeoutHorizontal') {
-            // Original is the text before this marker, skipping formatting tokens
-            for (let j = i - 1; j >= 0; j--) {
-              if (texts[j] !== 'bold' && texts[j] !== 'italic' && texts[j].trim()) {
-                original = texts[j];
-                break;
-              }
+        // Scan for the pattern: [ORIGINAL] "bold" "strikeoutHorizontal" " " [REPLACEMENT] "bold"
+        for (let i = 0; i < texts.length - 4; i++) {
+          if (texts[i + 1] === 'bold' && texts[i + 2] === 'strikeoutHorizontal') {
+            const candidate = texts[i];
+            // Skip if it's a format token, UI token, or context (contains …)
+            if (FORMAT_TOKENS.has(candidate) || UI_TOKENS.has(candidate)) continue;
+            if (candidate.includes('…') || candidate === message) continue;
+
+            original = candidate;
+
+            // Replacement follows after "strikeoutHorizontal", skip " " and "bold"
+            for (let j = i + 3; j < texts.length && j < i + 7; j++) {
+              const r = texts[j];
+              if (FORMAT_TOKENS.has(r)) continue;
+              if (UI_TOKENS.has(r)) break;
+              if (r.includes('…')) break;  // context, not replacement
+              replacement = r;
+              break;
             }
-            // Replacement is the next non-formatting text after the marker
-            for (let j = i + 1; j < texts.length; j++) {
-              if (texts[j] === 'bold' || texts[j] === 'italic' || texts[j] === ' ') continue;
-              if (texts[j] === 'strikeoutHorizontal') break;  // next card section
-              if (texts[j] === 'Accept' || texts[j] === 'Dismiss') break;
-              if (texts[j].trim()) {
-                replacement = texts[j];
-                break;
-              }
-            }
-            break;  // only need first occurrence
+            break;  // only need first occurrence (collapsed/expanded are dupes)
           }
         }
 
