@@ -418,14 +418,31 @@ export async function extractAlerts(page: IPage): Promise<Alert[]> {
         const { message, original, replacement } = parseCard(texts);
         if (!original) continue;
 
-        // Parse category from message or from editor span
-        let category = categoryMap.get(original) || 'unknown';
+        // Resolve category: try editor span map (exact + trimmed), then parse from message
+        let category = categoryMap.get(original)
+          || categoryMap.get(original.trim())
+          || 'unknown';
+
+        // If still unknown, parse from the message.
+        // Messages use two formats:
+        //   "Correctness · Use the right word"  (category · action)
+        //   "Correct your spelling"             (action only)
         if (category === 'unknown' && message) {
-          const msgLower = message.toLowerCase();
-          if (msgLower.startsWith('correctness') || msgLower.includes('spelling') || msgLower.includes('subject-verb')) category = 'correctness';
-          else if (msgLower.startsWith('clarity')) category = 'clarity';
-          else if (msgLower.startsWith('engagement')) category = 'engagement';
-          else if (msgLower.startsWith('delivery')) category = 'delivery';
+          // Format 1: split on " · " and match the prefix
+          const prefix = message.split(' · ')[0]?.toLowerCase();
+          if (prefix === 'correctness') category = 'correctness';
+          else if (prefix === 'clarity') category = 'clarity';
+          else if (prefix === 'engagement') category = 'engagement';
+          else if (prefix === 'delivery') category = 'delivery';
+
+          // Format 2: match known action phrases to categories
+          if (category === 'unknown') {
+            const m = message.toLowerCase();
+            if (/correct|spell|grammar|punctuat|tense|agree|article|pronoun|plural|singular|misuse|capitalize|hyphen|apostrophe|comma|semicolon|colon|quot|dash|paren/.test(m)) category = 'correctness';
+            else if (/clar|concis|wordy|verbose|vague|readab|simplif|rewrite|rephrase|restructur|redundan|passive/.test(m)) category = 'clarity';
+            else if (/engag|compel|interest|livel|vocabular|vari|monot|bland|word choice/.test(m)) category = 'engagement';
+            else if (/deliver|tone|formal|confident|friendly|diplomat|inclusive|respectful|sensitive|polite/.test(m)) category = 'delivery';
+          }
         }
 
         alerts.push({
