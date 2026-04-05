@@ -326,37 +326,40 @@ export async function extractAlerts(page: IPage): Promise<Alert[]> {
         let replacement = '';
 
         const FORMAT_TOKENS = new Set(['bold', 'italic', 'strikeoutHorizontal', ' ']);
-        const UI_TOKENS = new Set(['Accept', 'Dismiss', 'Incorrect suggestion', 'Offensive content']);
+        const UI_TOKENS = new Set(['Accept', 'Dismiss', 'Incorrect suggestion', 'Offensive content',
+          'and open next suggestion', 'Open suggestion card', 'Learn more', 'More Actions']);
+        const SKIP = new Set([...FORMAT_TOKENS, ...UI_TOKENS]);
 
-        // Extract message: first text matching category pattern
-        for (const t of texts) {
-          if (/^(Correctness|Clarity|Engagement|Delivery)\\s/.test(t) || /Correct |Use the |Rewrite|Consider|Add a/.test(t)) {
-            message = t;
+        // ── Find the original + replacement via strikeout pattern ──
+        // Pattern: [ORIGINAL] "bold" "strikeoutHorizontal" " " [REPLACEMENT] "bold"
+        for (let i = 0; i < texts.length - 4; i++) {
+          if (texts[i + 1] === 'bold' && texts[i + 2] === 'strikeoutHorizontal') {
+            const candidate = texts[i];
+            if (SKIP.has(candidate) || candidate.includes('…')) continue;
+
+            original = candidate;
+
+            for (let j = i + 3; j < texts.length && j < i + 7; j++) {
+              const r = texts[j];
+              if (FORMAT_TOKENS.has(r)) continue;
+              if (UI_TOKENS.has(r) || r.includes('…')) break;
+              replacement = r;
+              break;
+            }
             break;
           }
         }
 
-        // Scan for the pattern: [ORIGINAL] "bold" "strikeoutHorizontal" " " [REPLACEMENT] "bold"
-        for (let i = 0; i < texts.length - 4; i++) {
-          if (texts[i + 1] === 'bold' && texts[i + 2] === 'strikeoutHorizontal') {
-            const candidate = texts[i];
-            // Skip if it's a format token, UI token, or context (contains …)
-            if (FORMAT_TOKENS.has(candidate) || UI_TOKENS.has(candidate)) continue;
-            if (candidate.includes('…') || candidate === message) continue;
-
-            original = candidate;
-
-            // Replacement follows after "strikeoutHorizontal", skip " " and "bold"
-            for (let j = i + 3; j < texts.length && j < i + 7; j++) {
-              const r = texts[j];
-              if (FORMAT_TOKENS.has(r)) continue;
-              if (UI_TOKENS.has(r)) break;
-              if (r.includes('…')) break;  // context, not replacement
-              replacement = r;
-              break;
-            }
-            break;  // only need first occurrence (collapsed/expanded are dupes)
-          }
+        // ── Find the message: first meaningful text that isn't the original/replacement ──
+        // Works for both "Correctness · Use the right word" and "Rewrite in active voice"
+        for (const t of texts) {
+          if (SKIP.has(t)) continue;
+          if (/^\\d+$/.test(t)) continue;              // number badges
+          if (t.includes('…')) continue;               // context snippets
+          if (t === original || t === replacement) continue;
+          if (t.length < 3) continue;                  // too short to be a message
+          message = t;
+          break;
         }
 
         return { message, original, replacement };
@@ -522,28 +525,39 @@ const FIND_DOC_MODEL = `
 // ── Extract score from documentModel.score observable ────────────────
 
 export async function extractScore(page: IPage): Promise<number> {
+  // Poll the score observable — Grammarly computes it asynchronously
+  // after analysis completes. Wait up to 15s for it to populate.
   return page.evaluate(`
-    (() => {
+    new Promise(resolve => {
       const dm = ${FIND_DOC_MODEL};
-      if (!dm) return -1;
+      if (!dm) { resolve(-1); return; }
 
-      // score is an RxJS BehaviorSubject; _value is a tagged union {_tag, value}
-      const scoreObj = dm.score?._value;
-      if (scoreObj?._tag === 'Some' && typeof scoreObj.value === 'number') {
-        return scoreObj.value;
-      }
-
-      // Fallback: parse from the DOM button
-      const btns = document.querySelectorAll('button');
-      for (const btn of btns) {
-        if (btn.textContent?.includes('Overall score')) {
-          const span = btn.querySelector('span');
-          const n = parseInt(span?.textContent || '', 10);
-          if (!isNaN(n) && n >= 0 && n <= 100) return n;
+      let attempts = 0;
+      const iv = setInterval(() => {
+        attempts++;
+        const scoreObj = dm.score?._value;
+        if (scoreObj?._tag === 'Some' && typeof scoreObj.value === 'number') {
+          clearInterval(iv);
+          resolve(scoreObj.value);
+          return;
         }
-      }
-      return -1;
-    })()
+
+        // Fallback: check DOM button for rendered score
+        const btns = document.querySelectorAll('button');
+        for (const btn of btns) {
+          const label = btn.getAttribute('aria-label') || '';
+          const m = label.match(/score[:\\s]*(\\d+)/i);
+          if (m) { clearInterval(iv); resolve(parseInt(m[1], 10)); return; }
+          if (btn.textContent?.includes('Overall score')) {
+            const span = btn.querySelector('span');
+            const n = parseInt(span?.textContent || '', 10);
+            if (!isNaN(n) && n >= 0 && n <= 100) { clearInterval(iv); resolve(n); return; }
+          }
+        }
+
+        if (attempts >= 30) { clearInterval(iv); resolve(-1); }
+      }, 500);
+    })
   `) as Promise<number>;
 }
 
@@ -557,31 +571,40 @@ export async function extractDocStats(page: IPage): Promise<{
   wordsCount: number;
   charsCount: number;
 }> {
+  // Poll until score populates (up to 15s), then snapshot all stats
   return page.evaluate(`
-    (() => {
+    new Promise(resolve => {
       const dm = ${FIND_DOC_MODEL};
-      if (!dm) return { score: -1, scoreStatus: 'unknown', readabilityScore: -1, counters: {}, wordsCount: 0, charsCount: 0 };
+      if (!dm) { resolve({ score: -1, scoreStatus: 'unknown', readabilityScore: -1, counters: {}, wordsCount: 0, charsCount: 0 }); return; }
 
-      const scoreObj = dm.score?._value;
-      const score = scoreObj?._tag === 'Some' ? scoreObj.value : -1;
-      const scoreStatus = dm.scoreStatus?._value?.value || dm.scoreStatus?._value?._tag || 'unknown';
-      const counters = dm.counters?._value || {};
-      const textInfo = dm.textInfo?._value?.value || {};
+      let attempts = 0;
+      const iv = setInterval(() => {
+        attempts++;
+        const scoreObj = dm.score?._value;
+        const ready = (scoreObj?._tag === 'Some') || attempts >= 30;
+        if (!ready) return;
 
-      return {
-        score: typeof score === 'number' ? score : -1,
-        scoreStatus: String(scoreStatus),
-        readabilityScore: textInfo.readabilityScore ?? -1,
-        counters: {
-          critical: counters.critical || 0,
-          advanced: counters.advanced || 0,
-          free: counters.free || 0,
-          paid: counters.paid || 0,
-        },
-        wordsCount: textInfo.wordsCount || 0,
-        charsCount: textInfo.charsCount || 0,
-      };
-    })()
+        clearInterval(iv);
+        const score = scoreObj?._tag === 'Some' ? scoreObj.value : -1;
+        const scoreStatus = dm.scoreStatus?._value?.value || dm.scoreStatus?._value?._tag || 'unknown';
+        const counters = dm.counters?._value || {};
+        const textInfo = dm.textInfo?._value?.value || {};
+
+        resolve({
+          score: typeof score === 'number' ? score : -1,
+          scoreStatus: String(scoreStatus),
+          readabilityScore: textInfo.readabilityScore ?? -1,
+          counters: {
+            critical: counters.critical || 0,
+            advanced: counters.advanced || 0,
+            free: counters.free || 0,
+            paid: counters.paid || 0,
+          },
+          wordsCount: textInfo.wordsCount || 0,
+          charsCount: textInfo.charsCount || 0,
+        });
+      }, 500);
+    })
   `);
 }
 
