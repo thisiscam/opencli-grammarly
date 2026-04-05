@@ -9,6 +9,28 @@
  */
 
 import type { IPage } from '@jackwener/opencli/types';
+import { readFileSync, existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+// ── Input resolution ─────────────────────────────────────────────────
+
+/**
+ * Resolve input text: if --file is provided, read the file.
+ * Otherwise use the positional text argument directly.
+ */
+export function resolveText(text: string | undefined, file: string | undefined): string {
+  if (file) {
+    const resolved = resolve(file);
+    if (!existsSync(resolved)) {
+      throw new Error(`File not found: ${file}`);
+    }
+    return readFileSync(resolved, 'utf-8');
+  }
+  if (!text) {
+    throw new Error('Provide text as a positional argument or use --file <path>');
+  }
+  return text;
+}
 
 // ── Constants ────────────────────────────────────────────────────────
 

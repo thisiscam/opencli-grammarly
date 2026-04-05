@@ -16,7 +16,11 @@ opencli plugin install github:thisiscam/opencli-grammarly
 Check text for grammar, spelling, punctuation, and style issues.
 
 ```bash
+# Inline text
 opencli grammarly check "Their going to the store tommorow."
+
+# From a file
+opencli grammarly check --file essay.txt
 ```
 
 ```yaml
@@ -84,6 +88,7 @@ opencli grammarly check "text" \
 
 | Flag | Description |
 |------|-------------|
+| `--file <path>` | Read text from a file instead of passing inline |
 | `--doc <id>` | Use a specific Grammarly document ID instead of the shared scratch doc |
 | `--severity <level>` | Filter check results: `critical`, `warning`, or `all` (default) |
 | `--format <fmt>` | Output format: `yaml` (default), `json`, `table`, `csv` |
