@@ -200,25 +200,22 @@ export async function submitText(page: IPage, text: string, docId?: string, goal
     await setGoals(page, goals);
   }
 
-  // Focus the editor body and clear it completely
-  await page.evaluate(`document.querySelector('${SEL_EDITOR}')?.focus()`);
-  await page.wait(300);
+  // Clear the editor via DOM manipulation.
+  // pressKey('Meta+a') + pressKey('Backspace') does NOT work because
+  // opencli's CDP keyboard dispatch doesn't trigger ProseMirror's
+  // Cmd+A handler. Direct innerHTML replacement is reliable.
+  await page.evaluate(`
+    (() => {
+      const ed = document.querySelector('${SEL_EDITOR}');
+      if (!ed) return;
+      ed.innerHTML = '<p><br></p>';
+      ed.dispatchEvent(new Event('input', { bubbles: true }));
+      ed.focus();
+    })()
+  `);
+  await page.wait(500);
 
-  // Clear with retry — ProseMirror sometimes doesn't fully clear on first attempt
-  for (let attempt = 0; attempt < 3; attempt++) {
-    await page.pressKey('Meta+a');
-    await page.wait(200);
-    await page.pressKey('Backspace');
-    await page.wait(300);
-
-    // Verify editor is empty
-    const remaining = await page.evaluate(`
-      document.querySelector('${SEL_EDITOR}')?.innerText?.trim()?.length || 0
-    `) as number;
-    if (remaining === 0) break;
-  }
-
-  // Insert new text via CDP (native input, works with ProseMirror)
+  // Insert new text via CDP Input.insertText (works with ProseMirror)
   if (page.insertText) {
     await page.insertText(text);
   } else {
