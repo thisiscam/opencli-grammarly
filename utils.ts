@@ -285,221 +285,63 @@ async function waitForAnalysis(page: IPage): Promise<void> {
   `);
 }
 
-// ── Extract alerts via React fiber tree (fullContent SDUI) ───────────
+// ── Extract alerts from alertsRepository ─────────────────────────────
 
 export async function extractAlerts(page: IPage): Promise<Alert[]> {
-  // Walk the React fiber tree to find every longFormCard component.
-  // Each card's fullContent SDUI tree contains:
-  //   - Category + message: first text string like "Correctness · Use the right word"
-  //   - Original word: text immediately before a "strikeoutHorizontal" marker
-  //   - Replacement: text immediately after the "strikeoutHorizontal" + original pair
-  //
-  // This data is present for ALL cards, even collapsed ones.
+  // Access Grammarly's internal alertsRepository via React fiber tree.
+  // denaliViewModels._engine.alertsRepository.toArray() returns ALL alerts
+  // with structured data — no scrolling, no SDUI parsing, no DOM scraping.
   return page.evaluate(`
     (() => {
-      // ── Flatten all text strings from an SDUI tree ──
-      function extractTexts(obj, depth, out) {
-        if (!obj || depth > 15 || out.length > 50) return;
-        if (typeof obj === 'string') { out.push(obj); return; }
-        if (typeof obj.text === 'string') out.push(obj.text);
-        for (const k of Object.keys(obj)) {
-          const v = obj[k];
-          if (Array.isArray(v)) v.forEach(x => extractTexts(x, depth + 1, out));
-          else if (v && typeof v === 'object') extractTexts(v, depth + 1, out);
-        }
+      const root = document.querySelector('#page');
+      const ck = root && Object.keys(root).find(k => k.startsWith('__reactContainer'));
+      if (!ck) return [];
+      const fiber = root[ck];
+
+      // Find denaliViewModels in the fiber tree
+      let dvm = null;
+      const seen = new WeakSet();
+      function walk(f, d) {
+        if (!f || d > 65 || dvm || seen.has(f)) return;
+        seen.add(f);
+        if (f.memoizedProps?.denaliViewModels) { dvm = f.memoizedProps.denaliViewModels; return; }
+        walk(f.child, d + 1);
+        walk(f.sibling, d + 1);
       }
+      walk(fiber, 0);
+      if (!dvm?._engine?.alertsRepository) return [];
 
-      // ── Parse a fullContent text list into {message, original, replacement} ──
-      //
-      // SDUI text sequence pattern:
-      //   [message] [message-dup] [context?] [ORIGINAL] "bold" "strikeoutHorizontal"
-      //   " " [REPLACEMENT] "bold" [context?] ... (pattern repeats for collapsed/expanded)
-      //   "Accept" "Dismiss" ...
-      //
-      // Key insight: the sequence [word] "bold" "strikeoutHorizontal" always marks
-      // the original, and [word] "bold" immediately after marks the replacement.
-      // Context snippets contain "…" and should be skipped.
-      //
-      function parseCard(texts) {
-        let message = '';
-        let original = '';
-        let replacement = '';
-
-        const FORMAT_TOKENS = new Set(['bold', 'italic', 'strikeoutHorizontal', ' ']);
-        const UI_TOKENS = new Set(['Accept', 'Dismiss', 'Incorrect suggestion', 'Offensive content',
-          'and open next suggestion', 'Open suggestion card', 'Learn more', 'More Actions']);
-        const SKIP = new Set([...FORMAT_TOKENS, ...UI_TOKENS]);
-
-        // ── Find the original + replacement via strikeout pattern ──
-        // Pattern: [ORIGINAL] "bold" "strikeoutHorizontal" " " [REPLACEMENT] "bold"
-        for (let i = 0; i < texts.length - 4; i++) {
-          if (texts[i + 1] === 'bold' && texts[i + 2] === 'strikeoutHorizontal') {
-            const candidate = texts[i];
-            if (SKIP.has(candidate) || candidate.includes('…')) continue;
-
-            original = candidate;
-
-            for (let j = i + 3; j < texts.length && j < i + 7; j++) {
-              const r = texts[j];
-              if (FORMAT_TOKENS.has(r)) continue;
-              if (UI_TOKENS.has(r) || r.includes('…')) break;
-              replacement = r;
-              break;
-            }
-            break;
-          }
-        }
-
-        // ── Find the message: first meaningful text that isn't the original/replacement ──
-        // Works for both "Correctness · Use the right word" and "Rewrite in active voice"
-        for (const t of texts) {
-          if (SKIP.has(t)) continue;
-          if (/^\\d+$/.test(t)) continue;              // number badges
-          if (t.includes('…')) continue;               // context snippets
-          if (t === original || t === replacement) continue;
-          if (t.length < 3) continue;                  // too short to be a message
-          message = t;
-          break;
-        }
-
-        return { message, original, replacement };
-      }
-
-      // ── Get category from editor spans (they have alerts-{category} class) ──
-      const categoryMap = new Map();
-      const editorSpans = document.querySelectorAll('${SEL_FLAGGED}');
-      for (const span of editorSpans) {
-        const text = span.textContent?.trim();
-        if (!text) continue;
-        const cls = span.className || '';
-        let cat = 'unknown';
-        if (cls.includes('alerts-correctness')) cat = 'correctness';
-        else if (cls.includes('alerts-clarity')) cat = 'clarity';
-        else if (cls.includes('alerts-engagement')) cat = 'engagement';
-        else if (cls.includes('alerts-delivery')) cat = 'delivery';
-        categoryMap.set(text, cat);
-      }
-
-      // ── Walk UP from assistant panel DOM elements to find longFormCard fibers ──
-      // Top-down fiber traversal can't reach portal-mounted cards, but every
-      // rendered DOM element has a __reactFiber reference. We walk UP from
-      // each <span>/<strong> inside the assistant to find the nearest
-      // longFormCard ancestor (has fullContent + collapsedContent props).
-      const targets = document.querySelectorAll('${SEL_ASSISTANT} span, ${SEL_ASSISTANT} strong');
-      const cardMap = new Map();  // card id → fullContent texts
-
-      for (const el of targets) {
-        const fk = Object.keys(el).find(k => k.startsWith('__reactFiber'));
-        if (!fk) continue;
-        let f = el[fk];
-        for (let i = 0; i < 25 && f; i++) {
-          const p = f.memoizedProps;
-          if (p?.fullContent && p?.collapsedContent && p?.id && !cardMap.has(p.id)) {
-            const texts = [];
-            extractTexts(p.fullContent, 0, texts);
-            cardMap.set(p.id, texts);
-            break;
-          }
-          f = f.return;
-        }
-      }
-
-      // If fiber approach found nothing, fall back to editor spans
-      if (cardMap.size === 0) {
-        for (const [text, cat] of categoryMap) {
-          alerts.push({ rank: ++idx, category: cat, severity: 'warning', message: '', original: text, replacement: '', explanation: '' });
-        }
-        return alerts;
-      }
-
-      const cards = [...cardMap.values()];
-
-      // ── Build alert objects from card data ──
+      const raw = dvm._engine.alertsRepository.toArray();
       const alerts = [];
       let idx = 0;
-      for (const texts of cards) {
-        // Skip Pro upsell / promo cards
-        const joined = texts.join(' ');
-        if (joined.includes('with Pro') || joined.includes('Upgrade') || joined.includes('Get Pro')) continue;
 
-        const { message, original, replacement } = parseCard(texts);
+      for (const a of raw) {
+        // Skip disposed or invalid alerts
+        if (a._disposed || !a._isValid) continue;
+
+        const original = (a.highlightTexts || []).join(' ').trim();
         if (!original) continue;
 
-        // Resolve category: try editor span map (exact + trimmed), then parse from message
-        let category = categoryMap.get(original)
-          || categoryMap.get(original.trim())
-          || 'unknown';
-
-        // If still unknown, parse from the message.
-        // Messages use two formats:
-        //   "Correctness · Use the right word"  (category · action)
-        //   "Correct your spelling"             (action only)
-        if (category === 'unknown' && message) {
-          // Format 1: split on " · " and match the prefix
-          const prefix = message.split(' · ')[0]?.toLowerCase();
-          if (prefix === 'correctness') category = 'correctness';
-          else if (prefix === 'clarity') category = 'clarity';
-          else if (prefix === 'engagement') category = 'engagement';
-          else if (prefix === 'delivery') category = 'delivery';
-
-          // Format 2: match known action phrases to categories
-          if (category === 'unknown') {
-            const m = message.toLowerCase();
-            if (/correct|spell|grammar|punctuat|tense|agree|article|pronoun|plural|singular|misuse|capitalize|hyphen|apostrophe|comma|semicolon|colon|quot|dash|paren/.test(m)) category = 'correctness';
-            else if (/clar|concis|wordy|verbose|vague|readab|simplif|rewrite|rephrase|restructur|redundan|passive/.test(m)) category = 'clarity';
-            else if (/engag|compel|interest|livel|vocabular|vari|monot|bland|word choice/.test(m)) category = 'engagement';
-            else if (/deliver|tone|formal|confident|friendly|diplomat|inclusive|respectful|sensitive|polite/.test(m)) category = 'delivery';
-          }
-        }
+        // Strip HTML tags from explanation
+        const explanation = (a.explanation || '')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/\\s+/g, ' ')
+          .trim();
 
         alerts.push({
           rank: ++idx,
-          category,
-          severity: 'warning',
-          message,
+          category: a.lensType || 'unknown',
+          severity: a.alertType === 'premium' ? 'premium' : a.priority >= 2 ? 'critical' : 'warning',
+          message: a.categoryHuman || a.category || '',
           original,
-          replacement,
-          explanation: '',
+          replacement: a.replaceText || '',
+          explanation,
         });
       }
 
       return alerts;
     })()
   `) as Promise<Alert[]>;
-}
-
-function parseInterceptedAlerts(requests: any[]): Alert[] {
-  const alerts: Alert[] = [];
-  let idx = 0;
-
-  for (const req of requests) {
-    try {
-      const body = typeof req.responseBody === 'string'
-        ? JSON.parse(req.responseBody)
-        : req.responseBody;
-
-      // Grammarly's CAPI returns alerts in various shapes
-      const items = body?.alerts || body?.result?.alerts || body?.data?.alerts;
-      if (!Array.isArray(items)) continue;
-
-      for (const a of items) {
-        alerts.push({
-          rank: ++idx,
-          category: a.category?.toLowerCase() || a.group?.toLowerCase() || 'unknown',
-          severity: a.impact === 'critical' ? 'critical' : a.impact === 'advanced' ? 'info' : 'warning',
-          message: a.title || a.details || a.message || '',
-          original: a.highlightBegin != null && a.highlightEnd != null
-            ? a.text?.slice(a.highlightBegin, a.highlightEnd) || ''
-            : a.misspelled || '',
-          replacement: (a.replacements?.[0] || a.suggestion || ''),
-          explanation: a.explanation || a.details || '',
-        });
-      }
-    } catch {
-      // Not JSON or unexpected shape — skip
-    }
-  }
-  return alerts;
 }
 
 // ── Shared: find documentModel via React fiber ──────────────────────
