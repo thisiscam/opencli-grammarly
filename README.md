@@ -21,19 +21,26 @@ opencli grammarly check "Their going to the store tommorow."
 
 # From a file
 opencli grammarly check --file essay.txt
+
+# With goals
+opencli grammarly check --file report.md --audience expert --formality formal --domain academic
 ```
 
 ```yaml
 - rank: 1
   category: correctness
-  message: Correctness · Use the right word
+  severity: critical
+  message: Use the right word
   original: Their
   replacement: They're
+  explanation: "It seems like you used the wrong word here..."
 - rank: 2
   category: correctness
-  message: Correctness · Correct your spelling
+  severity: critical
+  message: Correct your spelling
   original: tommorow
   replacement: tomorrow
+  explanation: "Did you mean tomorrow?"
 ```
 
 ### score
@@ -42,6 +49,16 @@ Get writing score, readability, and alert counts.
 
 ```bash
 opencli grammarly score "The quick brown fox jumps over the lazy dog."
+```
+
+```yaml
+- score: 72
+  scoreStatus: OK
+  readabilityScore: 90
+  wordsCount: 44
+  charsCount: 314
+  critical: 2
+  advanced: 1
 ```
 
 ### tone
@@ -90,7 +107,7 @@ opencli grammarly check "text" \
 |------|-------------|
 | `--file <path>` | Read text from a file instead of passing inline |
 | `--doc <id>` | Use a specific Grammarly document ID instead of the shared scratch doc |
-| `--severity <level>` | Filter check results: `critical`, `warning`, or `all` (default) |
+| `--severity <level>` | Filter check results: `critical`, `premium`, or `all` (default) |
 | `--format <fmt>` | Output format: `yaml` (default), `json`, `table`, `csv` |
 
 ## How it works
@@ -99,7 +116,7 @@ opencli grammarly check "text" \
 
 2. **Scratch document** — commands create or reuse a Grammarly document titled "opencli-scratch" so your document list stays clean. Use `--doc <id>` to target a specific document.
 
-3. **React fiber extraction** — alerts (category, original, replacement, message) are extracted from Grammarly's React component tree, not scraped from rendered DOM. This works for both expanded and collapsed suggestion cards.
+3. **alertsRepository** — alerts are extracted from Grammarly's internal `alertsRepository` via the React fiber tree. This returns all alerts at once with full structured data (category, original, replacement, explanation, severity), regardless of list virtualization. No DOM scraping or scrolling needed.
 
 4. **Score and stats** — pulled from Grammarly's internal `documentModel` RxJS observables (readability score, word count, alert counters).
 
@@ -114,6 +131,9 @@ opencli grammarly check "text" \
 # After editing .ts files, rebuild:
 ./dev.sh
 
-# Test:
-opencli grammarly check "test text"
+# Rebuild + smoke test:
+./dev.sh test
+
+# Rebuild + check custom text:
+./dev.sh "Their going tommorow."
 ```
