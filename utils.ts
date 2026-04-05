@@ -46,6 +46,25 @@ const SEL_SCORE_BTN = 'button[aria-label*="score" i], button[aria-label*="Overal
 // Dashboard doc links: <a href="/ddocs/XXXXXXX" aria-label="Open document that starts with...">
 const SEL_DASHBOARD_DOC = 'a[href*="/ddocs/"]';
 
+// Goals button: <button aria-label="Goals: Adjust goals">
+const SEL_GOALS_BTN = 'button[aria-label*="Goals"]';
+
+// ── Goal options (valid values for each goal group) ──────────────────
+
+export const GOAL_OPTIONS = {
+  audience: ['general', 'knowledgeable', 'expert'] as const,
+  formality: ['informal', 'neutral', 'formal'] as const,
+  domain: ['academic', 'business', 'general', 'email', 'casual', 'creative'] as const,
+  intent: ['inform', 'describe', 'convince', 'tell a story'] as const,
+} as const;
+
+export interface Goals {
+  audience?: string;
+  formality?: string;
+  domain?: string;
+  intent?: string;
+}
+
 // ── Types ────────────────────────────────────────────────────────────
 
 export interface Alert {
@@ -103,9 +122,57 @@ async function resolveDocUrl(page: IPage, docId?: string): Promise<string> {
   return EDITOR_NEW_URL;
 }
 
+// ── Set goals via the Goals dialog ───────────────────────────────────
+
+async function setGoals(page: IPage, goals: Goals): Promise<void> {
+  // Click the Goals button to open the dialog
+  await page.evaluate(`document.querySelector('${SEL_GOALS_BTN}')?.click()`);
+  await page.wait(1000);
+
+  // For each goal, find the matching radio input by name + label and click it
+  // The dialog has <input name="audience"> + <label>general</label> pairs
+  for (const [group, value] of Object.entries(goals)) {
+    if (!value) continue;
+    await page.evaluate(`
+      (() => {
+        const inputs = document.querySelectorAll('input[name="${group}"]');
+        for (const input of inputs) {
+          const label = input.nextElementSibling || input.closest('label');
+          const labelText = (label?.textContent || '').trim().toLowerCase();
+          if (labelText === '${value.toLowerCase()}') {
+            input.click();
+            return true;
+          }
+        }
+        // Fallback: find label by text and click it
+        const labels = document.querySelectorAll('label');
+        for (const lbl of labels) {
+          if (lbl.textContent?.trim().toLowerCase() === '${value.toLowerCase()}') {
+            lbl.click();
+            return true;
+          }
+        }
+        return false;
+      })()
+    `);
+    await page.wait(200);
+  }
+
+  // Click Done to close the dialog
+  await page.evaluate(`
+    (() => {
+      const btns = document.querySelectorAll('button');
+      for (const btn of btns) {
+        if (btn.textContent?.trim() === 'Done') { btn.click(); return; }
+      }
+    })()
+  `);
+  await page.wait(500);
+}
+
 // ── Submit text to the Grammarly editor ──────────────────────────────
 
-export async function submitText(page: IPage, text: string, docId?: string): Promise<void> {
+export async function submitText(page: IPage, text: string, docId?: string, goals?: Goals): Promise<void> {
   const url = await resolveDocUrl(page, docId);
 
   // Install interceptor BEFORE navigating so we capture all API traffic
@@ -126,6 +193,11 @@ export async function submitText(page: IPage, text: string, docId?: string): Pro
       await page.evaluate(`document.execCommand('insertText', false, '${DEFAULT_DOC_TITLE}')`);
     }
     await page.wait(500);
+  }
+
+  // Set goals if provided (before inserting text so analysis uses them)
+  if (goals && Object.keys(goals).length > 0) {
+    await setGoals(page, goals);
   }
 
   // Focus the editor body and clear it completely
