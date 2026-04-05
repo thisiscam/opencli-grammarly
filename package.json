@@ -1,0 +1,31 @@
+{
+  "name": "opencli-grammarly",
+  "version": "0.1.0",
+  "description": "opencli adapter for Grammarly — grammar check, tone, score, and rewrite via grammarly.com",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "@jackwener/opencli": ">=0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "keywords": [
+    "opencli",
+    "opencli-adapter",
+    "grammarly",
+    "grammar",
+    "writing",
+    "tone",
+    "agent"
+  ],
+  "license": "MIT"
+}

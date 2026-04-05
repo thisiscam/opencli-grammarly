@@ -1,0 +1,6 @@
+{
+  "name": "grammarly",
+  "version": "0.1.0",
+  "description": "Grammar check, tone detection, writing score, and rewrite via grammarly.com",
+  "opencli": ">=0.1.0"
+}
