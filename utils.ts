@@ -335,10 +335,14 @@ export async function extractAlerts(page: IPage): Promise<Alert[]> {
           message: a.categoryHuman || a.category || '',
           original,
           replacement: (() => {
-            const r = (a.replaceText && a.replaceText !== original)
-              ? a.replaceText
-              : (a.labels?.[0]?.replacementTexts?.[0] || a.labels?.[0]?.label || null);
-            return (r && r !== original) ? r : null;
+            // Case 1: replaceText exists and differs from original → direct replacement
+            if (a.replaceText && a.replaceText !== original) return a.replaceText;
+            // Case 2: labels has replacementTexts → check for word replacement vs insertion
+            const labelText = a.labels?.[0]?.replacementTexts?.[0] || a.labels?.[0]?.label || null;
+            if (!labelText || labelText === original) return null;
+            // If labelText is just punctuation/whitespace, it's an insertion near the word
+            if (/^[,;:.!?\\-\\s]+$/.test(labelText)) return original + labelText;
+            return labelText;
           })(),
           explanation,
         });
