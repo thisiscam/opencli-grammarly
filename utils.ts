@@ -334,7 +334,11 @@ export async function extractAlerts(page: IPage): Promise<Alert[]> {
           severity: a.alertType === 'premium' ? 'premium' : a.priority >= 2 ? 'critical' : 'warning',
           message: a.categoryHuman || a.category || '',
           original,
-          replacement: a.replaceText || '',
+          // replaceText sometimes equals the original (e.g. "arises" -> "arises").
+          // In that case, the real replacement is in labels[0].replacementTexts[0].
+          replacement: (a.replaceText && a.replaceText !== original)
+            ? a.replaceText
+            : (a.labels?.[0]?.replacementTexts?.[0] || a.labels?.[0]?.label || a.replaceText || ''),
           explanation,
         });
       }
